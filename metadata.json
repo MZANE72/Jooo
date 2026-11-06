@@ -1,0 +1,8 @@
+{
+  "name": "Radyo FM",
+  "description": "Türkiye ulusal, yerel ve Kürtçe canlı radyo istasyonları, sesli komutlar, ekolayzır ve uyku modu",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
