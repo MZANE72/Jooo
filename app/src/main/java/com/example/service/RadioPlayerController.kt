@@ -58,11 +58,20 @@ object RadioPlayerController {
         playlist = stations
     }
 
+    private fun getHttpHeaders(): Map<String, String> {
+        return mapOf(
+            "User-Agent" to "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 RadyoApp/1.0",
+            "Icy-MetaData" to "1",
+            "Accept" to "*/*",
+            "Connection" to "keep-alive"
+        )
+    }
+
     fun play(station: RadioStation) {
         val context = applicationContext ?: return
         startPlaybackService(context)
 
-        // Release old player
+        // Release old player safely
         releasePlayer()
 
         _playbackState.value = _playbackState.value.copy(
@@ -74,46 +83,60 @@ object RadioPlayerController {
         requestAudioFocus()
 
         try {
-            mediaPlayer = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
-                setDataSource(context, Uri.parse(station.streamUrl))
-                setOnPreparedListener { mp ->
-                    mp.start()
-                    _playbackState.value = _playbackState.value.copy(
-                        status = PlaybackStatus.PLAYING,
-                        errorMessage = null
-                    )
-                    startEqualizerSimulation()
-                    updateNotification()
+            val mp = MediaPlayer()
+            mediaPlayer = mp
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .build()
+            )
+            mp.setDataSource(context, Uri.parse(station.streamUrl), getHttpHeaders())
+
+            mp.setOnPreparedListener { player ->
+                if (mediaPlayer == player) {
+                    try {
+                        player.start()
+                        _playbackState.value = _playbackState.value.copy(
+                            status = PlaybackStatus.PLAYING,
+                            errorMessage = null
+                        )
+                        startEqualizerSimulation()
+                        updateNotification()
+                    } catch (e: Exception) {
+                        handlePlaybackFailure(station, "Yayın başlatılamadı: ${e.message}")
+                    }
                 }
-                setOnErrorListener { _, what, extra ->
-                    // Try fallback stream if available
+            }
+
+            mp.setOnInfoListener { _, what, _ ->
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START) {
+                    _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.BUFFERING)
+                } else if (what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
+                    _playbackState.value = _playbackState.value.copy(status = PlaybackStatus.PLAYING)
+                }
+                true
+            }
+
+            mp.setOnErrorListener { player, what, extra ->
+                android.util.Log.e("RadioPlayerController", "MediaPlayer error: what=$what extra=$extra")
+                if (mediaPlayer == player) {
                     if (station.backupStreamUrl.isNotBlank() && station.backupStreamUrl != station.streamUrl) {
                         playFallback(station)
                     } else {
-                        _playbackState.value = _playbackState.value.copy(
-                            status = PlaybackStatus.ERROR,
-                            errorMessage = "Yayın akışı geçici olarak bağlanamadı."
-                        )
-                        stopEqualizerSimulation()
+                        handlePlaybackFailure(station, "Yayın akışı geçici olarak bağlanamadı.")
                     }
-                    true
                 }
-                prepareAsync()
+                true
             }
+
+            mp.prepareAsync()
         } catch (e: Exception) {
+            android.util.Log.e("RadioPlayerController", "play() exception: ${e.message}")
             if (station.backupStreamUrl.isNotBlank() && station.backupStreamUrl != station.streamUrl) {
                 playFallback(station)
             } else {
-                _playbackState.value = _playbackState.value.copy(
-                    status = PlaybackStatus.ERROR,
-                    errorMessage = "Bağlantı hatası: ${e.localizedMessage ?: "Bilinmeyen hata"}"
-                )
+                handlePlaybackFailure(station, "Bağlantı hatası: ${e.localizedMessage ?: "Bilinmeyen hata"}")
             }
         }
     }
@@ -122,39 +145,53 @@ object RadioPlayerController {
         val context = applicationContext ?: return
         try {
             releasePlayer()
-            mediaPlayer = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
-                setDataSource(context, Uri.parse(station.backupStreamUrl))
-                setOnPreparedListener { mp ->
-                    mp.start()
-                    _playbackState.value = _playbackState.value.copy(
-                        status = PlaybackStatus.PLAYING,
-                        errorMessage = null
-                    )
-                    startEqualizerSimulation()
-                    updateNotification()
-                }
-                setOnErrorListener { _, _, _ ->
-                    _playbackState.value = _playbackState.value.copy(
-                        status = PlaybackStatus.ERROR,
-                        errorMessage = "Yedek yayın akışına da ulaşılamadı."
-                    )
-                    stopEqualizerSimulation()
-                    true
-                }
-                prepareAsync()
-            }
-        } catch (_: Exception) {
-            _playbackState.value = _playbackState.value.copy(
-                status = PlaybackStatus.ERROR,
-                errorMessage = "Yayın açılamadı."
+            val mp = MediaPlayer()
+            mediaPlayer = mp
+            mp.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .build()
             )
+            mp.setDataSource(context, Uri.parse(station.backupStreamUrl), getHttpHeaders())
+
+            mp.setOnPreparedListener { player ->
+                if (mediaPlayer == player) {
+                    try {
+                        player.start()
+                        _playbackState.value = _playbackState.value.copy(
+                            status = PlaybackStatus.PLAYING,
+                            errorMessage = null
+                        )
+                        startEqualizerSimulation()
+                        updateNotification()
+                    } catch (e: Exception) {
+                        handlePlaybackFailure(station, "Yedek yayın başlatılamadı")
+                    }
+                }
+            }
+
+            mp.setOnErrorListener { player, what, extra ->
+                android.util.Log.e("RadioPlayerController", "Fallback error: what=$what extra=$extra")
+                if (mediaPlayer == player) {
+                    handlePlaybackFailure(station, "Yayın akışına ulaşılamadı. Farklı bir istasyon seçin.")
+                }
+                true
+            }
+
+            mp.prepareAsync()
+        } catch (e: Exception) {
+            handlePlaybackFailure(station, "Yayın açılamadı.")
         }
+    }
+
+    private fun handlePlaybackFailure(station: RadioStation, msg: String) {
+        _playbackState.value = _playbackState.value.copy(
+            status = PlaybackStatus.ERROR,
+            errorMessage = msg
+        )
+        stopEqualizerSimulation()
+        updateNotification()
     }
 
     fun pause() {
@@ -337,10 +374,26 @@ object RadioPlayerController {
 
     fun releasePlayer() {
         try {
-            mediaPlayer?.stop()
-            mediaPlayer?.release()
+            val mp = mediaPlayer
+            mediaPlayer = null
+            if (mp != null) {
+                mp.setOnPreparedListener(null)
+                mp.setOnErrorListener(null)
+                mp.setOnInfoListener(null)
+                mp.setOnCompletionListener(null)
+                try {
+                    if (mp.isPlaying) {
+                        mp.stop()
+                    }
+                } catch (_: Exception) {}
+                try {
+                    mp.reset()
+                } catch (_: Exception) {}
+                try {
+                    mp.release()
+                } catch (_: Exception) {}
+            }
         } catch (_: Exception) {}
-        mediaPlayer = null
         stopEqualizerSimulation()
     }
 }
